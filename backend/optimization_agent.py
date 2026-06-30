@@ -3,6 +3,16 @@ from datetime import datetime
 
 from backend.llm_client import call_llm, has_llm_config
 from backend.config import OPENAI_MODEL
+from backend.workflow_trace import (
+    build_workflow_steps,
+    build_workflow_summary,
+    build_workflow_mermaid
+)
+from backend.audit_logger import (
+    generate_id,
+    save_markdown_report,
+    log_agent_run
+)
 
 
 def _format_recommendations(recommendations: List[Dict[str, Any]], limit: int = 8) -> str:
@@ -139,6 +149,7 @@ def _fallback_report(
         x for x in recommendations
         if x.get("need_human_approval")
     ]
+
     if high_or_medium:
         lines.append("以下资源涉及生产环境、数据库、Redis 或 GPU 等高价值资源，建议进入人工审批流程：")
         for item in high_or_medium:
@@ -165,6 +176,7 @@ def generate_optimization_plan(
     utilization_result: Dict[str, Any]
 ) -> Dict[str, Any]:
     start_time = datetime.now()
+    run_id = generate_id("run")
 
     recommendations = utilization_result.get("optimization_recommendations", [])
     approval_items = [
@@ -185,7 +197,11 @@ def generate_optimization_plan(
             report = call_llm(prompt, system_prompt=system_prompt)
         except Exception as e:
             llm_error = str(e)
-            report = _fallback_report(billing_result, utilization_result, error_message=llm_error)
+            report = _fallback_report(
+                billing_result,
+                utilization_result,
+                error_message=llm_error
+            )
             llm_enabled = False
     else:
         report = _fallback_report(
@@ -194,10 +210,26 @@ def generate_optimization_plan(
             error_message="未配置 OPENAI_API_KEY"
         )
 
+    workflow_steps = build_workflow_steps(
+        billing_result=billing_result,
+        utilization_result=utilization_result,
+        llm_enabled=llm_enabled,
+        approval_count=len(approval_items)
+    )
+
+    workflow_summary = build_workflow_summary(workflow_steps)
+    workflow_mermaid = build_workflow_mermaid()
+
+    report_info = save_markdown_report(
+        markdown_report=report,
+        report_id=f"{run_id}_cost_report"
+    )
+
     elapsed_time = round((datetime.now() - start_time).total_seconds(), 3)
 
-    return {
+    result = {
         "success": True,
+        "run_id": run_id,
         "llm_enabled": llm_enabled,
         "llm_model": OPENAI_MODEL if llm_enabled else "local-rule-fallback",
         "llm_error": llm_error,
@@ -206,5 +238,22 @@ def generate_optimization_plan(
         "approval_count": len(approval_items),
         "estimated_monthly_saving": utilization_result.get("summary", {}).get("total_estimated_saving", 0),
         "saving_rate": utilization_result.get("summary", {}).get("saving_rate", 0),
-        "elapsed_time": elapsed_time
+        "workflow_steps": workflow_steps,
+        "workflow_summary": workflow_summary,
+        "workflow_mermaid": workflow_mermaid,
+        "elapsed_time": elapsed_time,
+        **report_info
     }
+
+    log_agent_run({
+        "run_id": run_id,
+        "llm_enabled": llm_enabled,
+        "llm_model": result["llm_model"],
+        "approval_count": result["approval_count"],
+        "estimated_monthly_saving": result["estimated_monthly_saving"],
+        "saving_rate": result["saving_rate"],
+        "report_id": result["report_id"],
+        "workflow_summary": workflow_summary
+    })
+
+    return result

@@ -1,5 +1,7 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional
 import shutil
 import time
 
@@ -7,11 +9,12 @@ from backend.config import DATA_DIR
 from backend.cost_analyzer import analyze_billing
 from backend.utilization_analyzer import analyze_utilization
 from backend.optimization_agent import generate_optimization_plan
+from backend.audit_logger import log_approval_decision
 
 app = FastAPI(
     title="CloudCostOps Agent API",
     description="Cloud Cost Optimization and Resource Governance Agent",
-    version="0.3.0"
+    version="0.5.0"
 )
 
 app.add_middleware(
@@ -23,11 +26,19 @@ app.add_middleware(
 )
 
 
+class ApprovalDecision(BaseModel):
+    run_id: str
+    decision: str
+    operator: str = "demo_user"
+    comment: Optional[str] = ""
+    approved_scope: Optional[str] = "low_risk_only"
+
+
 @app.get("/")
 def root():
     return {
         "message": "CloudCostOps Agent API is running.",
-        "version": "0.3.0"
+        "version": "0.5.0"
     }
 
 
@@ -141,4 +152,17 @@ async def generate_plan(
             "message": "生成成本优化建议失败。",
             "error": str(e),
             "total_elapsed_time": round(time.time() - start_time, 3)
+        }
+
+
+@app.post("/agent/approval-decision")
+async def submit_approval_decision(decision: ApprovalDecision):
+    try:
+        result = log_approval_decision(decision.model_dump())
+        return result
+    except Exception as e:
+        return {
+            "success": False,
+            "message": "审批决策记录失败。",
+            "error": str(e)
         }

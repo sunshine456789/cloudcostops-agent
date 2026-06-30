@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import plotly.express as px
+from datetime import datetime
 
 API_URL = "http://127.0.0.1:8000"
 
@@ -14,6 +15,9 @@ st.set_page_config(
 st.title("CloudCostOps Agent 云成本优化与资源治理平台")
 st.caption("Cloud Cost Optimization Agent powered by FastAPI + Streamlit + Pandas + DeepSeek")
 
+if "ai_result" not in st.session_state:
+    st.session_state["ai_result"] = None
+
 with st.sidebar:
     st.header("数据上传")
     st.write("支持云账单 CSV 和资源利用率 CSV")
@@ -23,6 +27,218 @@ with st.sidebar:
     st.write("v0.1：云账单成本分析")
     st.write("v0.2：资源利用率分析")
     st.write("v0.3：DeepSeek 降本建议 Agent")
+    st.write("v0.4：Agent 执行轨迹可视化")
+    st.write("v0.5：审批记录 + 审计日志 + 报告导出")
+
+
+def render_workflow_trace(result):
+    st.markdown("### Agent 执行轨迹")
+
+    workflow_steps = result.get("workflow_steps", [])
+    workflow_summary = result.get("workflow_summary", {})
+
+    if not workflow_steps:
+        st.info("当前结果中没有工作流轨迹。")
+        return
+
+    total_steps = workflow_summary.get("total_steps", len(workflow_steps))
+    success_count = workflow_summary.get("success_count", 0)
+    warning_count = workflow_summary.get("warning_count", 0)
+    pending_count = workflow_summary.get("pending_count", 0)
+    error_count = workflow_summary.get("error_count", 0)
+    total_duration_ms = workflow_summary.get("total_duration_ms", 0)
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("总步骤", total_steps)
+    col2.metric("成功", success_count)
+    col3.metric("需关注", warning_count)
+    col4.metric("待审批", pending_count)
+    col5.metric("模拟耗时", f"{total_duration_ms} ms")
+
+    progress_value = 0
+    if total_steps > 0:
+        finished_count = success_count + warning_count + pending_count
+        progress_value = min(finished_count / total_steps, 1.0)
+
+    st.progress(progress_value)
+
+    trace_df = pd.DataFrame(workflow_steps)
+
+    display_columns = [
+        "step_id",
+        "agent_name",
+        "stage",
+        "status_label",
+        "duration_ms",
+        "key_output"
+    ]
+
+    existing_columns = [col for col in display_columns if col in trace_df.columns]
+    st.dataframe(trace_df[existing_columns], use_container_width=True)
+
+    st.markdown("### 工作流细节")
+
+    for step in workflow_steps:
+        title = f"{step.get('step_id')}. {step.get('agent_name')} - {step.get('status_label')}"
+        with st.expander(title):
+            st.write(f"**阶段：** {step.get('stage')}")
+            st.write(f"**输入：** {step.get('input')}")
+            st.write(f"**执行动作：** {step.get('action')}")
+            st.write(f"**关键输出：** {step.get('key_output')}")
+            st.write(f"**耗时：** {step.get('duration_ms')} ms")
+
+            evidence = step.get("evidence", [])
+            if evidence:
+                st.write("**证据：**")
+                for item in evidence:
+                    st.write(f"- {item}")
+
+    workflow_mermaid = result.get("workflow_mermaid")
+    if workflow_mermaid:
+        st.markdown("### 工作流结构")
+        st.code(workflow_mermaid, language="mermaid")
+
+
+def render_approval_section(result):
+    st.markdown("### 审批决策记录")
+
+    run_id = result.get("run_id", "")
+    st.write(f"当前 Run ID：`{run_id}`")
+
+    with st.form("approval_form"):
+        approval_decision = st.selectbox(
+            "请选择审批决策：",
+            [
+                "仅记录建议，不执行任何动作",
+                "批准低风险优化项",
+                "中高风险全部转人工审批",
+                "拒绝本次全部优化建议"
+            ]
+        )
+
+        operator = st.text_input(
+            "审批人 / 操作人：",
+            value="demo_user"
+        )
+
+        approval_comment = st.text_area(
+            "审批备注：",
+            value="测试环境资源可优先释放，生产环境资源需要业务负责人确认。"
+        )
+
+        approved_scope = st.selectbox(
+            "审批范围：",
+            [
+                "low_risk_only",
+                "manual_review_required",
+                "reject_all",
+                "record_only"
+            ]
+        )
+
+        submitted = st.form_submit_button(
+            "提交审批决策并写入审计日志",
+            use_container_width=True
+        )
+
+    if submitted:
+        payload = {
+            "run_id": run_id,
+            "decision": approval_decision,
+            "operator": operator,
+            "comment": approval_comment,
+            "approved_scope": approved_scope
+        }
+
+        try:
+            approval_response = requests.post(
+                f"{API_URL}/agent/approval-decision",
+                json=payload,
+                timeout=60
+            )
+
+            approval_result = approval_response.json()
+
+            if approval_result.get("success"):
+                st.success(
+                    f"审批决策记录成功，Approval ID：{approval_result.get('approval_id')}"
+                )
+            else:
+                st.error("审批决策记录失败")
+                st.write(approval_result)
+
+        except requests.exceptions.ConnectionError:
+            st.error("无法连接后端服务，请确认 FastAPI 后端正在运行。")
+        except Exception as e:
+            st.error("提交审批决策时出现异常")
+            st.write(str(e))
+
+
+def render_report_export(result):
+    st.markdown("### 报告导出")
+
+    report_text = result.get("markdown_report", "")
+    report_filename = result.get("report_filename", "cloudcostops_report.md")
+
+    st.write(f"报告 ID：`{result.get('report_id')}`")
+    st.write(f"后端保存状态：`{result.get('report_saved')}`")
+
+    st.download_button(
+        label="下载 Markdown 成本优化报告",
+        data=report_text.encode("utf-8"),
+        file_name=report_filename,
+        mime="text/markdown",
+        use_container_width=True
+    )
+
+
+def render_ai_result(result):
+    if not result:
+        return
+
+    if not result.get("success"):
+        st.error("AI 降本建议生成失败")
+        st.write(result)
+        return
+
+    st.success("AI 降本建议生成完成")
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("预计月节省", f"{result.get('estimated_monthly_saving')} 元")
+    col2.metric("节省比例", f"{result.get('saving_rate')}%")
+    col3.metric("人工审批项", result.get("approval_count"))
+    col4.metric("模型", result.get("llm_model"))
+
+    if result.get("llm_enabled"):
+        st.success("DeepSeek 大模型调用成功")
+    else:
+        st.warning("当前使用本地规则兜底报告。请检查 .env 中的 OPENAI_API_KEY 或 DeepSeek 配置。")
+        if result.get("llm_error"):
+            st.code(result.get("llm_error"))
+
+    render_workflow_trace(result)
+
+    st.markdown("### Optimization Planning Agent 报告")
+    st.markdown(result.get("markdown_report", ""))
+
+    render_report_export(result)
+
+    approval_items = result.get("approval_items", [])
+    st.markdown("### 需要人工审批的资源")
+
+    if not approval_items:
+        st.info("当前没有必须人工审批的资源。")
+    else:
+        approval_df = pd.DataFrame(approval_items)
+        st.dataframe(approval_df, use_container_width=True)
+
+    render_approval_section(result)
+
+    st.markdown("### 执行信息")
+    st.write(f"Run ID：`{result.get('run_id')}`")
+    st.write(f"账单文件：{result.get('billing_filename')}")
+    st.write(f"利用率文件：{result.get('utilization_filename')}")
+    st.write(f"总响应耗时：{result.get('total_elapsed_time')} 秒")
 
 
 tab1, tab2, tab3 = st.tabs([
@@ -134,7 +350,9 @@ with tab1:
 
             except requests.exceptions.ConnectionError:
                 st.error("无法连接后端服务，请先启动 FastAPI 后端。")
-                st.code("python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --log-level debug")
+                st.code(
+                    "python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --log-level debug"
+                )
             except Exception as e:
                 st.error("请求过程中出现异常")
                 st.write(str(e))
@@ -256,7 +474,9 @@ with tab2:
 
             except requests.exceptions.ConnectionError:
                 st.error("无法连接后端服务，请先启动 FastAPI 后端。")
-                st.code("python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --log-level debug")
+                st.code(
+                    "python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --log-level debug"
+                )
             except Exception as e:
                 st.error("请求过程中出现异常")
                 st.write(str(e))
@@ -267,7 +487,10 @@ with tab2:
 with tab3:
     st.subheader("AI 降本建议 Agent")
 
-    st.write("同时上传云账单 CSV 和资源利用率 CSV，系统会联合分析成本、利用率、风险等级，并生成 Markdown 降本优化报告。")
+    st.write(
+        "同时上传云账单 CSV 和资源利用率 CSV，系统会联合分析成本、利用率、风险等级，"
+        "生成 Markdown 降本优化报告，并支持审批决策记录与审计日志。"
+    )
 
     col_a, col_b = st.columns(2)
 
@@ -285,10 +508,13 @@ with tab3:
             key="ai_utilization_file"
         )
 
-    if ai_billing_file is not None and ai_utilization_file is not None:
+    if ai_billing_file is not None:
         st.info(f"已选择账单文件：{ai_billing_file.name}")
+
+    if ai_utilization_file is not None:
         st.info(f"已选择利用率文件：{ai_utilization_file.name}")
 
+    if ai_billing_file is not None and ai_utilization_file is not None:
         if st.button("生成 AI 降本优化建议", use_container_width=True):
             files = {
                 "billing_file": (
@@ -312,48 +538,22 @@ with tab3:
                     )
 
                 result = response.json()
-
-                if not result.get("success"):
-                    st.error("AI 降本建议生成失败")
-                    st.write(result)
-                else:
-                    st.success("AI 降本建议生成完成")
-
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("预计月节省", f"{result.get('estimated_monthly_saving')} 元")
-                    col2.metric("节省比例", f"{result.get('saving_rate')}%")
-                    col3.metric("人工审批项", result.get("approval_count"))
-                    col4.metric("模型", result.get("llm_model"))
-
-                    if result.get("llm_enabled"):
-                        st.success("DeepSeek 大模型调用成功")
-                    else:
-                        st.warning("当前使用本地规则兜底报告。请检查 .env 中的 OPENAI_API_KEY 或 DeepSeek 配置。")
-                        if result.get("llm_error"):
-                            st.code(result.get("llm_error"))
-
-                    st.markdown("### Optimization Planning Agent 报告")
-                    st.markdown(result.get("markdown_report", ""))
-
-                    approval_items = result.get("approval_items", [])
-                    st.markdown("### 需要人工审批的资源")
-
-                    if not approval_items:
-                        st.info("当前没有必须人工审批的资源。")
-                    else:
-                        approval_df = pd.DataFrame(approval_items)
-                        st.dataframe(approval_df, use_container_width=True)
-
-                    st.markdown("### 执行信息")
-                    st.write(f"账单文件：{result.get('billing_filename')}")
-                    st.write(f"利用率文件：{result.get('utilization_filename')}")
-                    st.write(f"总响应耗时：{result.get('total_elapsed_time')} 秒")
+                st.session_state["ai_result"] = result
 
             except requests.exceptions.ConnectionError:
                 st.error("无法连接后端服务，请先启动 FastAPI 后端。")
-                st.code("python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --log-level debug")
+                st.code(
+                    "python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --log-level debug"
+                )
             except Exception as e:
                 st.error("请求过程中出现异常")
                 st.write(str(e))
     else:
         st.info("请同时上传云账单 CSV 和资源利用率 CSV。")
+
+    if st.session_state.get("ai_result") is not None:
+        render_ai_result(st.session_state["ai_result"])
+
+        if st.button("清空当前 AI 分析结果", use_container_width=True):
+            st.session_state["ai_result"] = None
+            st.rerun()
