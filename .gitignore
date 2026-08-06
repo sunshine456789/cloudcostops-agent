@@ -8,3 +8,6 @@ logs/
 .DS_Store
 .idea/
 .vscode/
+# Local baseline and refactor verification results
+baseline_results/
+refactor_results/
