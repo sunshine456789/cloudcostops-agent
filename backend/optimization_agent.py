@@ -173,10 +173,12 @@ def _fallback_report(
 
 def generate_optimization_plan(
     billing_result: Dict[str, Any],
-    utilization_result: Dict[str, Any]
+    utilization_result: Dict[str, Any],
+    run_id: str | None = None,
+    log_run: bool = True,
 ) -> Dict[str, Any]:
     start_time = datetime.now()
-    run_id = generate_id("run")
+    run_id = run_id or generate_id("run")
 
     recommendations = utilization_result.get("optimization_recommendations", [])
     approval_items = [
@@ -245,15 +247,18 @@ def generate_optimization_plan(
         **report_info
     }
 
-    log_agent_run({
-        "run_id": run_id,
-        "llm_enabled": llm_enabled,
-        "llm_model": result["llm_model"],
-        "approval_count": result["approval_count"],
-        "estimated_monthly_saving": result["estimated_monthly_saving"],
-        "saving_rate": result["saving_rate"],
-        "report_id": result["report_id"],
-        "workflow_summary": workflow_summary
-    })
+    if log_run:
+        log_agent_run({
+            "run_id": run_id,
+            "llm_enabled": llm_enabled,
+            "llm_model": result["llm_model"],
+            "approval_count": result["approval_count"],
+            "estimated_monthly_saving": result[
+                "estimated_monthly_saving"
+            ],
+            "saving_rate": result["saving_rate"],
+            "report_id": result["report_id"],
+            "workflow_summary": workflow_summary,
+        })
 
     return result

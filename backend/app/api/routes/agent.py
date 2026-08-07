@@ -12,10 +12,9 @@ from backend.app.services.upload_service import (
     save_csv_upload,
 )
 from backend.audit_logger import log_approval_decision
-from backend.cost_analyzer import analyze_billing
-from backend.optimization_agent import generate_optimization_plan
-from backend.utilization_analyzer import analyze_utilization
-
+from backend.app.agents.cloud_cost.graph import (
+    run_cloud_cost_graph,
+)
 
 router = APIRouter(prefix="/agent")
 
@@ -45,16 +44,9 @@ async def generate_plan(
             prefix="utilization",
         )
 
-        billing_result = analyze_billing(
-            str(billing_path)
-        )
-        utilization_result = analyze_utilization(
-            str(utilization_path)
-        )
-
-        agent_result = generate_optimization_plan(
-            billing_result=billing_result,
-            utilization_result=utilization_result,
+        agent_result = run_cloud_cost_graph(
+            billing_path=str(billing_path),
+            utilization_path=str(utilization_path),
         )
 
         return {
