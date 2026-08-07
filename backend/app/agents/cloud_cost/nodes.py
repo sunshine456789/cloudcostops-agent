@@ -4,6 +4,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from langgraph.types import interrupt
+
 from backend.app.agents.cloud_cost.state import CloudCostState
 from backend.cost_analyzer import analyze_billing
 from backend.optimization_agent import generate_optimization_plan
@@ -315,28 +317,231 @@ def optimization_planning_node(
         ),
     }
 
-
-def pending_approval_node(
+def approval_gate_node(
     state: CloudCostState,
 ) -> dict[str, Any]:
-    """标记流程进入人工审批状态。"""
+    """
+    进入人工审批阶段。
+
+    这个节点会先把 pending 状态真正写入 checkpoint，
+    下一节点再调用 interrupt() 暂停。
+    """
+    requested_at = time.time()
 
     return {
         "status": "pending_approval",
+        "approval_requested_at": requested_at,
         "workflow_steps": _append_step(
             state,
             agent_name="Human Approval Agent",
             stage="human_approval",
             status="pending",
             duration_ms=0,
-            action="暂停自动执行，等待人工审批。",
+            action="高风险优化动作需要人工确认，工作流进入审批阶段。",
             key_output=(
                 f"{len(state.get('approval_items', []))} "
-                "个优化项等待审批。"
+                "个优化项等待人工审批。"
             ),
             evidence=[
                 f"run_id={state['run_id']}",
+                f"max_risk_level={state.get('max_risk_level', 'unknown')}",
                 "workflow_status=pending_approval",
+            ],
+        ),
+    }
+
+
+def human_approval_node(
+    state: CloudCostState,
+) -> dict[str, Any]:
+    """
+    真正暂停 LangGraph。
+
+    interrupt() 不返回时，整个图停在这里。
+    调用 Command(resume=...) 后，decision_payload
+    才会获得人工传入的审批结果。
+    """
+
+    interrupt_payload = {
+        "type": "human_approval_required",
+        "run_id": state["run_id"],
+        "question": "是否批准本次高风险云资源优化方案？",
+        "max_risk_level": state.get(
+            "max_risk_level",
+            "unknown",
+        ),
+        "approval_count": len(
+            state.get("approval_items", [])
+        ),
+        "approval_items": state.get(
+            "approval_items",
+            [],
+        ),
+    }
+
+    decision_payload = interrupt(
+        interrupt_payload
+    )
+
+    if not isinstance(decision_payload, dict):
+        raise ValueError(
+            "审批恢复数据必须是 JSON 对象。"
+        )
+
+    decision = str(
+        decision_payload.get(
+            "decision",
+            "",
+        )
+    ).strip().lower()
+
+    if decision not in {
+        "approve",
+        "reject",
+    }:
+        raise ValueError(
+            "decision 必须为 approve 或 reject。"
+        )
+
+    operator = str(
+        decision_payload.get(
+            "operator",
+            "unknown",
+        )
+    ).strip()
+
+    comment = str(
+        decision_payload.get(
+            "comment",
+            "",
+        )
+    ).strip()
+
+    approved_scope = str(
+        decision_payload.get(
+            "approved_scope",
+            "all_proposed"
+            if decision == "approve"
+            else "none",
+        )
+    ).strip()
+
+    requested_at = state.get(
+        "approval_requested_at",
+        time.time(),
+    )
+
+    human_wait_ms = max(
+        0,
+        round(
+            (
+                time.time()
+                - requested_at
+            )
+            * 1000
+        ),
+    )
+
+    # 将之前的 pending 审批步骤更新为最终审批结果
+    steps = list(
+        state.get("workflow_steps", [])
+    )
+
+    for index in range(
+        len(steps) - 1,
+        -1,
+        -1,
+    ):
+        step = steps[index]
+
+        if (
+            step.get("stage")
+            == "human_approval"
+            and step.get("status")
+            == "pending"
+        ):
+            updated_step = dict(step)
+
+            updated_step.update({
+                "status": (
+                    "success"
+                    if decision == "approve"
+                    else "warning"
+                ),
+                "status_label": (
+                    "已批准"
+                    if decision == "approve"
+                    else "已拒绝"
+                ),
+                "duration_ms": human_wait_ms,
+                "action": (
+                    "人工审批已完成。"
+                ),
+                "key_output": (
+                    f"审批结果：{decision}"
+                ),
+                "evidence": [
+                    *step.get(
+                        "evidence",
+                        [],
+                    ),
+                    f"operator={operator}",
+                    (
+                        "approved_scope="
+                        f"{approved_scope}"
+                    ),
+                    f"comment={comment}",
+                ],
+            })
+
+            steps[index] = updated_step
+            break
+
+    return {
+        "approval_decision": decision,
+        "approval_operator": operator,
+        "approval_comment": comment,
+        "approved_scope": approved_scope,
+        "workflow_steps": steps,
+        "status": (
+            "approved"
+            if decision == "approve"
+            else "rejected"
+        ),
+    }
+
+
+def rejected_node(
+    state: CloudCostState,
+) -> dict[str, Any]:
+    """人工拒绝后终止本次优化流程。"""
+
+    return {
+        "status": "rejected",
+        "workflow_steps": _append_step(
+            state,
+            agent_name="Workflow Completion Agent",
+            stage="workflow_rejected",
+            status="warning",
+            duration_ms=0,
+            action=(
+                "人工拒绝高风险优化方案，"
+                "停止后续自动执行。"
+            ),
+            key_output=(
+                "本次优化任务已拒绝，"
+                "不会执行任何资源变更。"
+            ),
+            evidence=[
+                (
+                    "operator="
+                    f"{state.get('approval_operator', 'unknown')}"
+                ),
+                (
+                    "comment="
+                    f"{state.get('approval_comment', '')}"
+                ),
+                "workflow_status=rejected",
             ],
         ),
     }

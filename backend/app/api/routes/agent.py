@@ -13,6 +13,7 @@ from backend.app.services.upload_service import (
 )
 from backend.audit_logger import log_approval_decision
 from backend.app.agents.cloud_cost.graph import (
+    resume_cloud_cost_graph,
     run_cloud_cost_graph,
 )
 
@@ -85,13 +86,47 @@ async def generate_plan(
 async def submit_approval_decision(
     decision: ApprovalDecision,
 ) -> dict[str, Any]:
+    """
+    提交人工审批，并恢复对应的
+    LangGraph 工作流。
+    """
+
+    approval_payload = (
+        decision.model_dump()
+    )
+
     try:
-        return log_approval_decision(
-            decision.model_dump()
+        result = (
+            resume_cloud_cost_graph(
+                run_id=decision.run_id,
+                approval_payload=(
+                    approval_payload
+                ),
+            )
         )
+
+        log_approval_decision({
+            **approval_payload,
+            "workflow_status": (
+                result.get(
+                    "status"
+                )
+            ),
+        })
+
+        return result
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
 
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"审批决策记录失败：{exc}",
+            detail=(
+                "审批并恢复工作流失败："
+                f"{exc}"
+            ),
         ) from exc
