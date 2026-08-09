@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from langgraph.checkpoint.memory import (
-    InMemorySaver,
-)
+import sqlite3
+from pathlib import Path
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+
 from langgraph.graph import (
     END,
     START,
@@ -208,13 +210,41 @@ builder.add_edge(
 )
 
 
-# 当前开发阶段使用内存 Checkpointer
-checkpointer = InMemorySaver()
+# ============================================================
+# LangGraph 持久化 Checkpoint
+# ============================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
+RUNTIME_DIR = PROJECT_ROOT / "runtime"
+RUNTIME_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+CHECKPOINT_DB_PATH = (
+    RUNTIME_DIR
+    / "langgraph_checkpoints.sqlite"
+)
+
+
+# check_same_thread=False：
+# FastAPI 请求可能由不同工作线程处理。
+# SqliteSaver 内部使用锁保证自身操作安全。
+checkpoint_connection = sqlite3.connect(
+    str(CHECKPOINT_DB_PATH),
+    check_same_thread=False,
+)
+
+
+checkpointer = SqliteSaver(
+    checkpoint_connection
+)
+
 
 cloud_cost_graph = builder.compile(
     checkpointer=checkpointer
 )
-
 
 WORKFLOW_MERMAID = """
 flowchart TD
