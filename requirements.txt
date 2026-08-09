@@ -63,3 +63,6 @@ tzdata==2026.2
 urllib3==2.6.3
 uvicorn==0.39.0
 watchdog==6.0.0
+
+SQLAlchemy>=2.0,<3.0
+alembic>=1.13,<2.0
